@@ -8,7 +8,7 @@ Auto-discover data lineage from SQL queries, track data flows, and simplify comp
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 - **Docker & Docker Compose**
@@ -29,7 +29,7 @@ docker-compose up -d
 # 3. Verify everything is running
 curl http://localhost:8080/api/health
 # Expected: {"status":"ok","neo4j":"connected"}
-````
+```
 
 ### Access Points
 
@@ -41,7 +41,7 @@ curl http://localhost:8080/api/health
 
 -----
 
-## 🏗️ Architecture
+## Architecture
 
 DataGov relies on a multi-service architecture separating metadata, graph relationships, and parsing logic:
 
@@ -68,7 +68,7 @@ daprago/
 
 -----
 
-## 💻 Development Guide
+## Development Guide
 
 ### Backend (Go)
 
@@ -103,7 +103,7 @@ docker exec -it daprago_postgres psql -U daprago -d daprago_metadata
 
 -----
 
-## ✨ Features & Roadmap (MVP)
+## Features & Roadmap (MVP)
 
   - [ ] Postgres connector (query history → lineage)
   - [ ] Neo4j graph storage
@@ -115,7 +115,7 @@ docker exec -it daprago_postgres psql -U daprago -d daprago_metadata
 
 -----
 
-## 📄 License & Authors
+## License & Authors
 
 This project is licensed under the **MIT License**.
 
