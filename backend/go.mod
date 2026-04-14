@@ -8,4 +8,8 @@ require (
 	github.com/neo4j/neo4j-go-driver/v6 v6.0.0
 )
 
-require golang.org/x/time v0.14.0 // indirect
+require (
+	github.com/google/uuid v1.6.0
+	github.com/lib/pq v1.12.3
+	golang.org/x/time v0.14.0 // indirect
+)

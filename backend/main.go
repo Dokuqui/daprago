@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/Dokuqui/daprago/api"
 	"github.com/Dokuqui/daprago/config"
 	"github.com/Dokuqui/daprago/lineage"
 	"github.com/joho/godotenv"
@@ -110,6 +111,9 @@ func setupRoutes(e *echo.Echo, graphStore *lineage.GraphStore, tenantID string) 
 		}
 		return c.JSON(200, stats)
 	})
+
+	discoverHandler := api.NewDiscoverHandler(graphStore, tenantID)
+	e.POST("/api/v1/discover/postgres", discoverHandler.DiscoverPostgres)
 }
 
 func testGraphStore(ctx context.Context, graphStore *lineage.GraphStore) {
