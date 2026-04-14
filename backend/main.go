@@ -4,8 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
 
+	"github.com/Dokuqui/daprago/config"
+	"github.com/Dokuqui/daprago/lineage"
 	"github.com/joho/godotenv"
 	"github.com/labstack/echo/v5"
 	"github.com/labstack/echo/v5/middleware"
@@ -17,25 +18,25 @@ func main() {
 		log.Println("No .env file found, using environment variables")
 	}
 
-	neo4jURI := os.Getenv("NEO4J_URI")
-	neo4jUser := os.Getenv("NEO4J_USER")
-	neo4jPassword := os.Getenv("NEO4J_PASSWORD")
-	appPort := os.Getenv("APP_PORT")
-	if appPort == "" {
-		appPort = "8080"
-	}
+	cfg := config.LoadConfig()
+	fmt.Println(cfg.String())
 
-	driver, err := neo4j.NewDriver(neo4jURI, neo4j.BasicAuth(neo4jUser, neo4jPassword, ""))
+	ctx := context.Background()
+	driver, err := neo4j.NewDriver(cfg.Neo4jURI, neo4j.BasicAuth(cfg.Neo4jUser, cfg.Neo4jPassword, ""))
 	if err != nil {
 		log.Fatalf("Failed to connect to Neo4j: %v", err)
 	}
-	defer driver.Close(context.Background())
+	defer driver.Close(ctx)
 
-	err = driver.VerifyConnectivity(context.Background())
+	err = driver.VerifyConnectivity(ctx)
 	if err != nil {
 		log.Fatalf("Neo4j connectivity check failed: %v", err)
 	}
 	fmt.Println("Connected to Neo4j")
+
+	graphStore := lineage.NewGraphStore(driver)
+
+	testGraphStore(ctx, graphStore)
 
 	e := echo.New()
 
@@ -51,18 +52,83 @@ func main() {
 		})
 	})
 
-	setupRoutes(e, driver)
+	setupRoutes(e, graphStore, cfg.TenantID)
 
-	fmt.Printf("DataGov API starting on port %s\n", appPort)
-	if err := e.Start(":" + appPort); err != nil {
+	fmt.Printf("DataGov API starting on port %s\n", cfg.AppPort)
+	if err := e.Start(":" + cfg.AppPort); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 }
 
-func setupRoutes(e *echo.Echo, driver neo4j.Driver) {
+func setupRoutes(e *echo.Echo, graphStore *lineage.GraphStore, tenantID string) {
 	e.GET("/api/v1/tables", func(c *echo.Context) error {
-		return c.JSON(200, map[string]string{
-			"message": "Tables endpoint - coming soon",
+		tables, err := graphStore.ListTables(c.Request().Context(), tenantID, 100)
+		if err != nil {
+			return c.JSON(500, map[string]string{"error": err.Error()})
+		}
+		return c.JSON(200, tables)
+	})
+
+	e.GET("/api/v1/tables/:id", func(c *echo.Context) error {
+		tableID := c.Param("id")
+		table, err := graphStore.GetTable(c.Request().Context(), tableID, tenantID)
+		if err != nil {
+			return c.JSON(500, map[string]string{"error": err.Error()})
+		}
+		if table == nil {
+			return c.JSON(404, map[string]string{"error": "table not found"})
+		}
+		return c.JSON(200, table)
+	})
+
+	e.GET("/api/v1/lineage/:id", func(c *echo.Context) error {
+		tableID := c.Param("id")
+		lineageData, err := graphStore.GetLineage(c.Request().Context(), tableID, tenantID, 5)
+		if err != nil {
+			return c.JSON(500, map[string]string{"error": err.Error()})
+		}
+		return c.JSON(200, map[string]interface{}{
+			"upstream": lineageData,
 		})
 	})
+
+	e.GET("/api/v1/downstream/:id", func(c *echo.Context) error {
+		tableID := c.Param("id")
+		downstream, err := graphStore.GetDownstream(c.Request().Context(), tableID, tenantID, 5)
+		if err != nil {
+			return c.JSON(500, map[string]string{"error": err.Error()})
+		}
+		return c.JSON(200, map[string]interface{}{
+			"downstream": downstream,
+		})
+	})
+
+	e.GET("/api/v1/stats", func(c *echo.Context) error {
+		stats, err := graphStore.GetStatistics(c.Request().Context(), tenantID)
+		if err != nil {
+			return c.JSON(500, map[string]string{"error": err.Error()})
+		}
+		return c.JSON(200, stats)
+	})
+}
+
+func testGraphStore(ctx context.Context, graphStore *lineage.GraphStore) {
+	tenantID := "local-dev"
+
+	tables := []*lineage.Table{
+		{ID: "tbl_001", Name: "users", Schema: "public", Database: "production", TenantID: tenantID},
+		{ID: "tbl_002", Name: "orders", Schema: "public", Database: "production", TenantID: tenantID},
+		{ID: "tbl_003", Name: "user_orders", Schema: "analytics", Database: "production", TenantID: tenantID},
+	}
+
+	for _, table := range tables {
+		if err := graphStore.CreateTable(ctx, table); err != nil {
+			log.Printf("Error creating table %s: %v", table.Name, err)
+		}
+	}
+
+	fmt.Println("Sample data loaded into Neo4j")
+
+	stats, _ := graphStore.GetStatistics(ctx, tenantID)
+	fmt.Printf("Graph Statistics: %v\n", stats)
 }

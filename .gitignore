@@ -45,3 +45,6 @@ logs/
 # Neo4j
 neo4j/data
 neo4j/logs
+
+docs/connection
+docs/neo4j
