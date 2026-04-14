@@ -127,7 +127,7 @@ func testGraphStore(ctx context.Context, graphStore *lineage.GraphStore) {
 		}
 	}
 
-	fmt.Println("✅ Sample data loaded into Neo4j")
+	fmt.Println("Sample data loaded into Neo4j")
 
 	stats, _ := graphStore.GetStatistics(ctx, tenantID)
 	fmt.Printf("Graph Statistics: %v\n", stats)
