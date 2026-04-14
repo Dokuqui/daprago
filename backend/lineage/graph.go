@@ -159,6 +159,7 @@ func (g *GraphStore) CreateRelationship(ctx context.Context, transformationID st
 			map[string]interface{}{
 				"transformation_id": transformationID,
 				"table_id":          tableID,
+				"tenant_id":         "local-dev",
 			},
 		)
 	})
