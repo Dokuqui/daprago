@@ -37,7 +37,9 @@ func main() {
 
 	graphStore := lineage.NewGraphStore(driver)
 
-	testGraphStore(ctx, graphStore)
+	if cfg.AppEnv == "dev-seed" {
+		testGraphStore(ctx, graphStore)
+	}
 
 	e := echo.New()
 

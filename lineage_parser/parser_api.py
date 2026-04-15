@@ -15,7 +15,23 @@ WRITE_PATTERNS = [
 
 
 def normalize_table_name(name: str) -> str:
-    return name.replace('"', "").strip()
+    """
+    Normalize table names:
+    - remove quotes/backticks
+    - trim spaces
+    - reduce db.schema.table -> schema.table
+    - keep schema.table when possible
+    """
+    if not name:
+        return ""
+
+    n = name.strip().replace('"', "").replace("`", "")
+    n = re.sub(r"\s+", "", n)
+
+    parts = n.split(".")
+    if len(parts) >= 2:
+        return f"{parts[-2]}.{parts[-1]}"
+    return f"public.{parts[0]}" if parts and parts[0] else ""
 
 
 def extract_write_tables(sql: str):
@@ -27,6 +43,63 @@ def extract_write_tables(sql: str):
     return list(set(writes))
 
 
+def remove_cte_aliases(sql: str, reads: list[str]) -> list[str]:
+    """
+    Remove CTE aliases from reads.
+    Example:
+      WITH recent_orders AS (...) SELECT * FROM recent_orders
+    recent_orders is not a physical table.
+    """
+    cte_aliases = set()
+    for alias in re.findall(
+        r"(?:WITH|,)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+AS\s*\(", sql, flags=re.IGNORECASE
+    ):
+        cte_aliases.add(alias.lower())
+        cte_aliases.add(f"public.{alias.lower()}")
+
+    output = []
+    for t in reads:
+        if t.lower() not in cte_aliases:
+            output.append(t)
+    return output
+
+
+def parse_sql_lineage(sql: str) -> dict:
+    raw_reads = []
+
+    try:
+        parser = Parser(sql)
+        raw_reads = parser.tables or []
+    except ValueError as e:
+        if "Not supported query type" in str(e):
+            sql_upper = sql.strip().upper()
+            if sql_upper.startswith("MERGE"):
+                source_match = re.search(
+                    r"USING\s+([a-zA-Z0-9_.\"]+)", sql, re.IGNORECASE
+                )
+                if source_match:
+                    raw_reads.append(source_match.group(1))
+        else:
+            raise e
+
+    reads = [normalize_table_name(t) for t in raw_reads if t]
+
+    writes = extract_write_tables(sql)
+
+    reads = remove_cte_aliases(sql, reads)
+
+    read_set: set[str] = set([r for r in reads if r])
+    write_set: set[str] = set([w for w in writes if w])
+
+    read_set = read_set - write_set
+
+    return {
+        "query_hash": hashlib.md5(sql.encode("utf-8")).hexdigest(),
+        "reads_tables": sorted(list(read_set)),
+        "writes_tables": sorted(list(write_set)),
+    }
+
+
 @app.post("/parser")
 def parser_sql():
     body = request.get_json(force=True)
@@ -36,19 +109,8 @@ def parser_sql():
         return jsonify({"error": "sql is required"}), 400
 
     try:
-        parser = Parser(sql)
-        reads = [normalize_table_name(t) for t in (parser.tables or [])]
-        writes = extract_write_tables(sql)
-
-        reads = [t for t in reads if t not in writes]
-
-        return jsonify(
-            {
-                "query_hash": hashlib.md5(sql.encode("utf-8")).hexdigest(),
-                "reads_tables": list(set(reads)),
-                "writes_tables": list(set(writes)),
-            }
-        ), 200
+        parsed = parse_sql_lineage(sql)
+        return jsonify(parsed), 200
     except Exception as e:
         return jsonify(
             {
