@@ -64,13 +64,11 @@ func main() {
 }
 
 func setupRoutes(e *echo.Echo, graphStore *lineage.GraphStore, tenantID string) {
-	e.GET("/api/v1/tables", func(c *echo.Context) error {
-		tables, err := graphStore.ListTables(c.Request().Context(), tenantID, 100)
-		if err != nil {
-			return c.JSON(500, map[string]string{"error": err.Error()})
-		}
-		return c.JSON(200, tables)
-	})
+	listHandler := api.NewListHandler(graphStore, tenantID)
+
+	e.GET("/api/v1/tables", listHandler.ListTables)
+
+	e.GET("/api/v1/transformations", listHandler.ListTransformations)
 
 	e.GET("/api/v1/tables/:id", func(c *echo.Context) error {
 		tableID := c.Param("id")

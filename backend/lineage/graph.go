@@ -372,3 +372,217 @@ func (g *GraphStore) GetStatistics(ctx context.Context, tenantID string) (map[st
 
 	return stats, err
 }
+
+func (g *GraphStore) CountTables(ctx context.Context, tenantID string, search string, schema string) (int, error) {
+	session := g.driver.NewSession(ctx, neo4j.SessionConfig{
+		AccessMode: neo4j.AccessModeRead,
+	})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		query := `
+MATCH (t:Table {tenant_id: $tenant_id})
+WHERE ($search = '' OR toLower(t.name) CONTAINS toLower($search))
+  AND ($schema = '' OR toLower(t.schema) = toLower($schema))
+RETURN count(t) as total
+`
+		result, err := tx.Run(ctx, query, map[string]interface{}{
+			"tenant_id": tenantID,
+			"search":    search,
+			"schema":    schema,
+		})
+		if err != nil {
+			return 0, err
+		}
+		if result.Next(ctx) {
+			val := result.Record().Values[0]
+			switch v := val.(type) {
+			case int64:
+				return int(v), nil
+			case int:
+				return v, nil
+			default:
+				return 0, nil
+			}
+		}
+		return 0, nil
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	total, ok := res.(int)
+	if !ok {
+		return 0, nil
+	}
+	return total, nil
+}
+
+func (g *GraphStore) ListTablesPaginated(ctx context.Context, tenantID string, limit int, offset int, search string, schema string) ([]*Table, error) {
+	session := g.driver.NewSession(ctx, neo4j.SessionConfig{
+		AccessMode: neo4j.AccessModeRead,
+	})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		query := `
+MATCH (t:Table {tenant_id: $tenant_id})
+WHERE ($search = '' OR toLower(t.name) CONTAINS toLower($search))
+  AND ($schema = '' OR toLower(t.schema) = toLower($schema))
+RETURN t.id, t.name, t.schema, t.database, t.created_at, t.last_seen
+ORDER BY t.schema ASC, t.name ASC
+SKIP $offset
+LIMIT $limit
+`
+		result, err := tx.Run(ctx, query, map[string]interface{}{
+			"tenant_id": tenantID,
+			"search":    search,
+			"schema":    schema,
+			"offset":    offset,
+			"limit":     limit,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		var tables []*Table
+		for result.Next(ctx) {
+			r := result.Record()
+			t := &Table{
+				ID:       toString(r.Values[0]),
+				Name:     toString(r.Values[1]),
+				Schema:   toString(r.Values[2]),
+				Database: toString(r.Values[3]),
+				TenantID: tenantID,
+			}
+			tables = append(tables, t)
+		}
+		return tables, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	tables, ok := res.([]*Table)
+	if !ok {
+		return []*Table{}, nil
+	}
+	return tables, nil
+}
+
+func (g *GraphStore) CountTransformations(ctx context.Context, tenantID string) (int, error) {
+	session := g.driver.NewSession(ctx, neo4j.SessionConfig{
+		AccessMode: neo4j.AccessModeRead,
+	})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		result, err := tx.Run(ctx,
+			`MATCH (tr:Transformation {tenant_id: $tenant_id}) RETURN count(tr)`,
+			map[string]interface{}{"tenant_id": tenantID},
+		)
+		if err != nil {
+			return 0, err
+		}
+		if result.Next(ctx) {
+			if v, ok := result.Record().Values[0].(int64); ok {
+				return int(v), nil
+			}
+		}
+		return 0, nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return res.(int), nil
+}
+
+func (g *GraphStore) ListTransformationsPaginated(ctx context.Context, tenantID string, limit int, offset int) ([]*Transformation, error) {
+	session := g.driver.NewSession(ctx, neo4j.SessionConfig{
+		AccessMode: neo4j.AccessModeRead,
+	})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		result, err := tx.Run(ctx, `
+MATCH (tr:Transformation {tenant_id: $tenant_id})
+RETURN tr.id, tr.type, tr.query_hash, tr.execution_count, tr.avg_duration_ms, tr.executed_at
+ORDER BY tr.executed_at DESC
+SKIP $offset
+LIMIT $limit
+`, map[string]interface{}{
+			"tenant_id": tenantID,
+			"offset":    offset,
+			"limit":     limit,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		var items []*Transformation
+		for result.Next(ctx) {
+			r := result.Record()
+			item := &Transformation{
+				ID:             toString(r.Values[0]),
+				Type:           toString(r.Values[1]),
+				QueryHash:      toString(r.Values[2]),
+				ExecutionCount: toInt64(r.Values[3]),
+				AvgDurationMs:  toFloat64(r.Values[4]),
+				TenantID:       tenantID,
+			}
+			items = append(items, item)
+		}
+		return items, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	items, ok := res.([]*Transformation)
+	if !ok {
+		return []*Transformation{}, nil
+	}
+	return items, nil
+}
+
+func toInt64(v interface{}) int64 {
+	if v == nil {
+		return 0
+	}
+	switch n := v.(type) {
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case float64:
+		return int64(n)
+	default:
+		return 0
+	}
+}
+
+func toFloat64(v interface{}) float64 {
+	if v == nil {
+		return 0
+	}
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int64:
+		return float64(n)
+	case int:
+		return float64(n)
+	default:
+		return 0
+	}
+}
+
+func toString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
