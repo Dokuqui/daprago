@@ -64,7 +64,9 @@ func main() {
 }
 
 func setupRoutes(e *echo.Echo, graphStore *lineage.GraphStore, tenantID string) {
+	discoverHandler := api.NewDiscoverHandler(graphStore, tenantID)
 	listHandler := api.NewListHandler(graphStore, tenantID)
+	graphHandler := api.NewGraphHandler(graphStore, tenantID)
 
 	e.GET("/api/v1/tables", listHandler.ListTables)
 
@@ -112,8 +114,9 @@ func setupRoutes(e *echo.Echo, graphStore *lineage.GraphStore, tenantID string) 
 		return c.JSON(200, stats)
 	})
 
-	discoverHandler := api.NewDiscoverHandler(graphStore, tenantID)
 	e.POST("/api/v1/discover/postgres", discoverHandler.DiscoverPostgres)
+
+	e.GET("/api/v1/graph/:tableId", graphHandler.GetGraph)
 }
 
 func testGraphStore(ctx context.Context, graphStore *lineage.GraphStore) {
