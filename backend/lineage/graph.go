@@ -3,6 +3,7 @@ package lineage
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/neo4j/neo4j-go-driver/v6/neo4j"
@@ -543,6 +544,233 @@ LIMIT $limit
 		return []*Transformation{}, nil
 	}
 	return items, nil
+}
+
+func (g *GraphStore) GetGraphForTable(ctx context.Context, tenantID string, tableID string, depth int, direction string) (*GraphPayload, error) {
+	session := g.driver.NewSession(ctx, neo4j.SessionConfig{
+		AccessMode: neo4j.AccessModeRead,
+	})
+	defer session.Close(ctx)
+
+	if depth < 1 {
+		depth = 1
+	}
+	if depth > 5 {
+		depth = 5
+	}
+	depthStr := strconv.Itoa(depth)
+
+	var cypher string
+
+	switch direction {
+	case "upstream":
+		// Upstream around root:
+		// sourceTable -[:READS_FROM]-> tr -[:WRITES_TO]-> root
+		cypher = `
+MATCH (root:Table {id: $table_id, tenant_id: $tenant_id})
+OPTIONAL MATCH p=(src:Table {tenant_id: $tenant_id})<-[:READS_FROM*1..` + depthStr + `]-(tr:Transformation {tenant_id: $tenant_id})-[:WRITES_TO]->(root)
+WITH collect(p) AS paths
+UNWIND paths AS path
+WITH path WHERE path IS NOT NULL
+UNWIND relationships(path) AS rel
+WITH DISTINCT startNode(rel) AS s, endNode(rel) AS t, type(rel) AS relType
+RETURN
+  collect(DISTINCT {
+    id: s.id,
+    label: CASE WHEN 'Table' IN labels(s) THEN coalesce(s.schema,'') + '.' + coalesce(s.name,'') ELSE coalesce(s.type,'TRANSFORMATION') END,
+    type: CASE WHEN 'Table' IN labels(s) THEN 'table' ELSE 'transformation' END
+  }) +
+  collect(DISTINCT {
+    id: t.id,
+    label: CASE WHEN 'Table' IN labels(t) THEN coalesce(t.schema,'') + '.' + coalesce(t.name,'') ELSE coalesce(t.type,'TRANSFORMATION') END,
+    type: CASE WHEN 'Table' IN labels(t) THEN 'table' ELSE 'transformation' END
+  }) AS nodes,
+  collect(DISTINCT {
+    source: s.id,
+    target: t.id,
+    type: relType
+  }) AS edges
+`
+
+	case "downstream":
+		// Downstream around root:
+		// root <-[:READS_FROM]- tr -[:WRITES_TO*1..depth]-> table
+		cypher = `
+MATCH (root:Table {id: $table_id, tenant_id: $tenant_id})
+OPTIONAL MATCH p=(root)<-[:READS_FROM]-(tr:Transformation {tenant_id: $tenant_id})-[:WRITES_TO*1..` + depthStr + `]->(dst:Table {tenant_id: $tenant_id})
+WITH collect(p) AS paths
+UNWIND paths AS path
+WITH path WHERE path IS NOT NULL
+UNWIND relationships(path) AS rel
+WITH DISTINCT startNode(rel) AS s, endNode(rel) AS t, type(rel) AS relType
+RETURN
+  collect(DISTINCT {
+    id: s.id,
+    label: CASE WHEN 'Table' IN labels(s) THEN coalesce(s.schema,'') + '.' + coalesce(s.name,'') ELSE coalesce(s.type,'TRANSFORMATION') END,
+    type: CASE WHEN 'Table' IN labels(s) THEN 'table' ELSE 'transformation' END
+  }) +
+  collect(DISTINCT {
+    id: t.id,
+    label: CASE WHEN 'Table' IN labels(t) THEN coalesce(t.schema,'') + '.' + coalesce(t.name,'') ELSE coalesce(t.type,'TRANSFORMATION') END,
+    type: CASE WHEN 'Table' IN labels(t) THEN 'table' ELSE 'transformation' END
+  }) AS nodes,
+  collect(DISTINCT {
+    source: s.id,
+    target: t.id,
+    type: relType
+  }) AS edges
+`
+
+	default: // both
+		cypher = `
+MATCH (root:Table {id: $table_id, tenant_id: $tenant_id})
+OPTIONAL MATCH p1=(src:Table {tenant_id: $tenant_id})<-[:READS_FROM*1..` + depthStr + `]-(upTr:Transformation {tenant_id: $tenant_id})-[:WRITES_TO]->(root)
+OPTIONAL MATCH p2=(root)<-[:READS_FROM]-(downTr:Transformation {tenant_id: $tenant_id})-[:WRITES_TO*1..` + depthStr + `]->(dst:Table {tenant_id: $tenant_id})
+WITH collect(p1) + collect(p2) AS paths
+UNWIND paths AS path
+WITH path WHERE path IS NOT NULL
+UNWIND relationships(path) AS rel
+WITH DISTINCT startNode(rel) AS s, endNode(rel) AS t, type(rel) AS relType
+RETURN
+  collect(DISTINCT {
+    id: s.id,
+    label: CASE WHEN 'Table' IN labels(s) THEN coalesce(s.schema,'') + '.' + coalesce(s.name,'') ELSE coalesce(s.type,'TRANSFORMATION') END,
+    type: CASE WHEN 'Table' IN labels(s) THEN 'table' ELSE 'transformation' END
+  }) +
+  collect(DISTINCT {
+    id: t.id,
+    label: CASE WHEN 'Table' IN labels(t) THEN coalesce(t.schema,'') + '.' + coalesce(t.name,'') ELSE coalesce(t.type,'TRANSFORMATION') END,
+    type: CASE WHEN 'Table' IN labels(t) THEN 'table' ELSE 'transformation' END
+  }) AS nodes,
+  collect(DISTINCT {
+    source: s.id,
+    target: t.id,
+    type: relType
+  }) AS edges
+`
+	}
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		result, err := tx.Run(ctx, cypher, map[string]interface{}{
+			"tenant_id": tenantID,
+			"table_id":  tableID,
+			"depth":     depth,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		if !result.Next(ctx) {
+			return &GraphPayload{
+				Nodes: []GraphNode{},
+				Edges: []GraphEdge{},
+			}, nil
+		}
+
+		record := result.Record()
+
+		nodes := []GraphNode{}
+		edges := []GraphEdge{}
+
+		if len(record.Values) > 0 {
+			nodes = parseGraphNodes(record.Values[0])
+		}
+		if len(record.Values) > 1 {
+			edges = parseGraphEdges(record.Values[1])
+		}
+
+		nodes = dedupeNodes(nodes)
+		edges = dedupeEdges(edges)
+
+		return &GraphPayload{
+			Nodes: nodes,
+			Edges: edges,
+		}, nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	payload, ok := res.(*GraphPayload)
+	if !ok {
+		return &GraphPayload{Nodes: []GraphNode{}, Edges: []GraphEdge{}}, nil
+	}
+	return payload, nil
+}
+
+// Helpers
+func parseGraphNodes(v interface{}) []GraphNode {
+	out := []GraphNode{}
+	arr, ok := v.([]interface{})
+	if !ok {
+		return out
+	}
+
+	for _, item := range arr {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		node := GraphNode{
+			ID:    toString(m["id"]),
+			Label: toString(m["label"]),
+			Type:  toString(m["type"]),
+		}
+		if node.ID != "" {
+			out = append(out, node)
+		}
+	}
+	return out
+}
+
+func parseGraphEdges(v interface{}) []GraphEdge {
+	out := []GraphEdge{}
+	arr, ok := v.([]interface{})
+	if !ok {
+		return out
+	}
+
+	for _, item := range arr {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		edge := GraphEdge{
+			Source: toString(m["source"]),
+			Target: toString(m["target"]),
+			Type:   toString(m["type"]),
+		}
+		if edge.Source != "" && edge.Target != "" {
+			out = append(out, edge)
+		}
+	}
+	return out
+}
+
+func dedupeNodes(nodes []GraphNode) []GraphNode {
+	seen := map[string]bool{}
+	out := []GraphNode{}
+	for _, n := range nodes {
+		if !seen[n.ID] {
+			seen[n.ID] = true
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func dedupeEdges(edges []GraphEdge) []GraphEdge {
+	seen := map[string]bool{}
+	out := []GraphEdge{}
+	for _, e := range edges {
+		key := e.Source + "->" + e.Target + ":" + e.Type
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func toInt64(v interface{}) int64 {
